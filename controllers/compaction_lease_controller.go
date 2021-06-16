@@ -112,7 +112,9 @@ func (lc *CompactionLeaseController) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if etcd.Spec.Backup.Store == nil {
-		return ctrl.Result{}, nil
+		return ctrl.Result{
+			Requeue: false,
+		}, nil
 	}
 
 	logger := lc.logger.WithValues("etcd", kutil.Key(etcd.Namespace, etcd.Name).String())
@@ -173,7 +175,7 @@ func (lc *CompactionLeaseController) reconcileJob(ctx context.Context, logger lo
 
 	// First check if a job is already running
 	job := &batchv1.Job{}
-	err := lc.Get(ctx, types.NamespacedName{Name: getJobName(etcd), Namespace: etcd.Namespace}, job)
+	err := lc.Get(ctx, types.NamespacedName{Name: utils.GetJobName(etcd), Namespace: etcd.Namespace}, job)
 
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -228,7 +230,7 @@ func (lc *CompactionLeaseController) reconcileJob(ctx context.Context, logger lo
 
 func (lc *CompactionLeaseController) delete(ctx context.Context, logger logr.Logger, etcd *druidv1alpha1.Etcd) (ctrl.Result, error) {
 	job := &batchv1.Job{}
-	err := lc.Get(ctx, types.NamespacedName{Name: getJobName(etcd), Namespace: etcd.Namespace}, job)
+	err := lc.Get(ctx, types.NamespacedName{Name: utils.GetJobName(etcd), Namespace: etcd.Namespace}, job)
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("error while fetching compaction job: %v", err)
@@ -246,7 +248,9 @@ func (lc *CompactionLeaseController) delete(ctx context.Context, logger logr.Log
 	}
 
 	logger.Info("No compaction job is running")
-	return ctrl.Result{Requeue: false}, nil
+	return ctrl.Result{
+		Requeue: false,
+	}, nil
 }
 
 func (lc *CompactionLeaseController) createCompactJob(ctx context.Context, logger logr.Logger, etcd *druidv1alpha1.Etcd) (*batchv1.Job, error) {
@@ -267,7 +271,7 @@ func (lc *CompactionLeaseController) createCompactJob(ctx context.Context, logge
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      getJobName(etcd),
+			Name:      utils.GetJobName(etcd),
 			Namespace: etcd.Namespace,
 			Labels:    getLabels(etcd),
 			OwnerReferences: []metav1.OwnerReference{
@@ -293,7 +297,7 @@ func (lc *CompactionLeaseController) createCompactJob(ctx context.Context, logge
 				},
 				Spec: v1.PodSpec{
 					ActiveDeadlineSeconds: pointer.Int64Ptr(int64(activeDeadlineSeconds)),
-					ServiceAccountName:    getServiceAccountName(etcd),
+					ServiceAccountName:    utils.GetServiceAccountName(etcd),
 					RestartPolicy:         v1.RestartPolicyNever,
 					Containers: []v1.Container{{
 						Name:            "compact-backup",
@@ -321,14 +325,6 @@ func (lc *CompactionLeaseController) createCompactJob(ctx context.Context, logge
 
 	//TODO (abdasgupta): Evaluate necessity of claiming object here after creation
 	return job, nil
-}
-
-func getCronJobName(etcd *druidv1alpha1.Etcd) string {
-	return fmt.Sprintf("%s-compact-backup", etcd.Name)
-}
-
-func getJobName(etcd *druidv1alpha1.Etcd) string {
-	return fmt.Sprintf("%s-compact-job", string(etcd.UID[:6]))
 }
 
 func getLabels(etcd *druidv1alpha1.Etcd) map[string]string {

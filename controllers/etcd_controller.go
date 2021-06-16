@@ -26,6 +26,7 @@ import (
 	druidv1alpha1 "github.com/gardener/etcd-druid/api/v1alpha1"
 	"github.com/gardener/etcd-druid/pkg/common"
 	componentetcd "github.com/gardener/etcd-druid/pkg/component/etcd"
+	componentconfigmap "github.com/gardener/etcd-druid/pkg/component/etcd/configmap"
 	componentlease "github.com/gardener/etcd-druid/pkg/component/etcd/lease"
 	componentservice "github.com/gardener/etcd-druid/pkg/component/etcd/service"
 	druidpredicates "github.com/gardener/etcd-druid/pkg/predicate"
@@ -62,7 +63,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -145,10 +145,6 @@ func getChartPathForStatefulSet() string {
 	return filepath.Join("etcd", "templates", "etcd-statefulset.yaml")
 }
 
-func getChartPathForConfigMap() string {
-	return filepath.Join("etcd", "templates", "etcd-configmap.yaml")
-}
-
 func getChartPathForService() string {
 	return filepath.Join("etcd", "templates", "etcd-service.yaml")
 }
@@ -203,12 +199,39 @@ func (r *EtcdReconciler) InitializeControllerWithImageVector() (*EtcdReconciler,
 	return r, nil
 }
 
+// SetupWithManager sets up manager with a new controller and r as the reconcile.Reconciler
+func (r *EtcdReconciler) SetupWithManager(mgr ctrl.Manager, workers int, ignoreOperationAnnotation bool) error {
+	builder := ctrl.NewControllerManagedBy(mgr).WithOptions(controller.Options{
+		MaxConcurrentReconciles: workers,
+	})
+	builder = builder.WithEventFilter(buildPredicate(ignoreOperationAnnotation)).For(&druidv1alpha1.Etcd{})
+	if ignoreOperationAnnotation {
+		builder = builder.Owns(&corev1.Service{}).
+			Owns(&corev1.ConfigMap{}).
+			Owns(&appsv1.StatefulSet{})
+	}
+	return builder.Complete(r)
+}
+
+func buildPredicate(ignoreOperationAnnotation bool) predicate.Predicate {
+	if ignoreOperationAnnotation {
+		return predicate.GenerationChangedPredicate{}
+	}
+
+	return predicate.Or(
+		druidpredicates.HasOperationAnnotation(),
+		druidpredicates.LastOperationNotSuccessful(),
+		extensionspredicate.IsDeleting(),
+	)
+}
+
 // +kubebuilder:rbac:groups=druid.gardener.cloud,resources=etcds,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=druid.gardener.cloud,resources=etcds/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile reconciles the etcd.
 func (r *EtcdReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	r.logger.Info("ETCD controller reconciliation started")
 	etcd := &druidv1alpha1.Etcd{}
 	if err := r.Get(ctx, req.NamespacedName, etcd); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -228,7 +251,6 @@ func (r *EtcdReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 func (r *EtcdReconciler) reconcile(ctx context.Context, etcd *druidv1alpha1.Etcd) (ctrl.Result, error) {
 	logger := r.logger.WithValues("etcd", kutil.Key(etcd.Namespace, etcd.Name).String(), "operation", "reconcile")
-	logger.Info("ETCD controller reconciliation started")
 
 	// Add Finalizers to Etcd
 	if finalizers := sets.NewString(etcd.Finalizers...); !finalizers.Has(FinalizerName) {
@@ -310,7 +332,7 @@ func (r *EtcdReconciler) reconcile(ctx context.Context, etcd *druidv1alpha1.Etcd
 
 func (r *EtcdReconciler) cleanCronJobs(ctx context.Context, logger logr.Logger, etcd *druidv1alpha1.Etcd) (*batchv1beta1.CronJob, error) {
 	cronJob := &batchv1beta1.CronJob{}
-	err := r.Get(ctx, types.NamespacedName{Name: getCronJobName(etcd), Namespace: etcd.Namespace}, cronJob)
+	err := r.Get(ctx, types.NamespacedName{Name: utils.GetCronJobName(etcd), Namespace: etcd.Namespace}, cronJob)
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			return nil, err
@@ -347,11 +369,11 @@ func (r *EtcdReconciler) delete(ctx context.Context, etcd *druidv1alpha1.Etcd) (
 
 	// TODO(abdasgupta) : This is for backward compatibility towards ETCD-Druid 0.6.0. Remove it.
 	cronJob := &batchv1beta1.CronJob{}
-	if err := client.IgnoreNotFound(r.Get(ctx, types.NamespacedName{Name: getCronJobName(etcd), Namespace: etcd.Namespace}, cronJob)); err != nil {
+	if err := client.IgnoreNotFound(r.Get(ctx, types.NamespacedName{Name: utils.GetCronJobName(etcd), Namespace: etcd.Namespace}, cronJob)); err != nil {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("error while fetching compaction cron job: %v", err)
 	}
 
-	if cronJob.Name == getCronJobName(etcd) && cronJob.DeletionTimestamp == nil {
+	if cronJob.Name == utils.GetCronJobName(etcd) && cronJob.DeletionTimestamp == nil {
 		logger.Info("Deleting cron job", "cronjob", kutil.ObjectName(cronJob))
 		if err := client.IgnoreNotFound(r.Delete(ctx, cronJob, client.PropagationPolicy(metav1.DeletePropagationForeground))); err != nil {
 			return ctrl.Result{
@@ -393,6 +415,13 @@ func (r *EtcdReconciler) delete(ctx context.Context, etcd *druidv1alpha1.Etcd) (
 		}, err
 	}
 
+	cmDeployer := componentconfigmap.New(r.Client, etcd.Namespace, componentconfigmap.GenerateValues(etcd))
+	if err := cmDeployer.Destroy(ctx); err != nil {
+		return ctrl.Result{
+			Requeue: true,
+		}, err
+	}
+
 	if sets.NewString(etcd.Finalizers...).Has(FinalizerName) {
 		logger.Info("Removing finalizer")
 		if err := controllerutils.PatchRemoveFinalizers(ctx, r.Client, etcd, FinalizerName); client.IgnoreNotFound(err) != nil {
@@ -414,132 +443,6 @@ func (r *EtcdReconciler) getServiceFromEtcd(etcd *druidv1alpha1.Etcd, renderedCh
 	}
 
 	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader([]byte(renderedChart.Files()[servicePath])), 1024)
-
-	if err = decoder.Decode(&decoded); err != nil {
-		return nil, err
-	}
-	return decoded, nil
-}
-
-func (r *EtcdReconciler) reconcileConfigMaps(ctx context.Context, logger logr.Logger, etcd *druidv1alpha1.Etcd, renderedChart *chartrenderer.RenderedChart) (*corev1.ConfigMap, error) {
-	logger.Info("Reconciling etcd configmap")
-
-	selector, err := metav1.LabelSelectorAsSelector(etcd.Spec.Selector)
-	if err != nil {
-		logger.Error(err, "Error converting etcd selector to selector")
-		return nil, err
-	}
-
-	// list all configmaps to include the configmaps that don't match the etcd`s selector
-	// anymore but has the stale controller ref.
-	cms := &corev1.ConfigMapList{}
-	err = r.List(ctx, cms, client.InNamespace(etcd.Namespace), client.MatchingLabelsSelector{Selector: selector})
-	if err != nil {
-		logger.Error(err, "Error listing configmaps")
-		return nil, err
-	}
-
-	// NOTE: filteredCMs are pointing to deepcopies of the cache, but this could change in the future.
-	// Ref: https://github.com/kubernetes-sigs/controller-runtime/blob/release-0.2/pkg/cache/internal/cache_reader.go#L74
-	// if you need to modify them, you need to copy it first.
-	filteredCMs, err := r.claimConfigMaps(ctx, etcd, selector, cms)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(filteredCMs) > 0 {
-		logger.Info("Claiming existing etcd configmaps")
-
-		// Keep only 1 Configmap. Delete the rest
-		for i := 1; i < len(filteredCMs); i++ {
-			ss := filteredCMs[i]
-			if err := r.Delete(ctx, ss); err != nil {
-				logger.Error(err, "Error in deleting duplicate StatefulSet")
-				continue
-			}
-		}
-
-		// Return the updated Configmap
-		cm := &corev1.ConfigMap{}
-		err = r.Get(ctx, types.NamespacedName{Name: filteredCMs[0].Name, Namespace: filteredCMs[0].Namespace}, cm)
-		if err != nil {
-			return nil, err
-		}
-
-		// ConfigMap is claimed by for this etcd. Just sync the data
-		if cm, err = r.syncConfigMapData(ctx, logger, cm, etcd, renderedChart); err != nil {
-			return nil, err
-		}
-
-		return cm, err
-	}
-
-	// Required Configmap doesn't exist. Create new
-
-	cm, err := r.getConfigMapFromEtcd(etcd, renderedChart)
-	if err != nil {
-		return nil, err
-	}
-
-	err = r.Create(ctx, cm)
-
-	// Ignore the precondition violated error, this machine is already updated
-	// with the desired label.
-	if err == errorsutil.ErrPreconditionViolated {
-		logger.Info("ConfigMap precondition doesn't hold, skip updating it.", "configmap", kutil.Key(cm.Namespace, cm.Name).String())
-		err = nil
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	if err := controllerutil.SetControllerReference(etcd, cm, r.Scheme); err != nil {
-		return nil, err
-	}
-
-	return cm.DeepCopy(), err
-}
-
-func (r *EtcdReconciler) syncConfigMapData(ctx context.Context, logger logr.Logger, cm *corev1.ConfigMap, etcd *druidv1alpha1.Etcd, renderedChart *chartrenderer.RenderedChart) (*corev1.ConfigMap, error) {
-	decoded, err := r.getConfigMapFromEtcd(etcd, renderedChart)
-	if err != nil {
-		return nil, err
-	}
-
-	if reflect.DeepEqual(cm.Data, decoded.Data) {
-		return cm, nil
-	}
-	cmCopy := cm.DeepCopy()
-	cmCopy.Data = decoded.Data
-
-	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		return r.Patch(ctx, cmCopy, client.MergeFrom(cm))
-	})
-
-	// Ignore the precondition violated error, this machine is already updated
-	// with the desired label.
-	if err == errorsutil.ErrPreconditionViolated {
-		logger.Info("ConfigMap precondition doesn't hold, skip updating it.", "configmap", kutil.Key(cm.Namespace, cm.Name).String())
-		err = nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return cmCopy, err
-}
-
-func (r *EtcdReconciler) getConfigMapFromEtcd(etcd *druidv1alpha1.Etcd, renderedChart *chartrenderer.RenderedChart) (*corev1.ConfigMap, error) {
-	var err error
-	decoded := &corev1.ConfigMap{}
-	configMapPath := getChartPathForConfigMap()
-
-	if _, ok := renderedChart.Files()[configMapPath]; !ok {
-		return nil, fmt.Errorf("missing configmap template file in the charts: %v", configMapPath)
-	}
-
-	//logger.Infof("%v: %v", statefulsetPath, renderer.Files()[statefulsetPath])
-	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader([]byte(renderedChart.Files()[configMapPath])), 1024)
 
 	if err = decoder.Decode(&decoded); err != nil {
 		return nil, err
@@ -941,21 +844,15 @@ func (r *EtcdReconciler) reconcileRoleBinding(ctx context.Context, logger logr.L
 }
 
 func (r *EtcdReconciler) reconcileEtcd(ctx context.Context, logger logr.Logger, etcd *druidv1alpha1.Etcd) (*string, *appsv1.StatefulSet, error) {
+	// Check if Spec.Replicas is odd or even.
+	if etcd.Spec.Replicas&1 == 0 {
+		return nil, nil, fmt.Errorf("Spec.Replicas should not be even number: %d", etcd.Spec.Replicas)
+	}
+
 	val := componentetcd.Values{
-		Lease:   componentlease.GenerateValues(etcd),
-		Service: componentservice.GenerateValues(etcd),
-	}
-
-	values, err := getMapFromEtcd(r.ImageVector, etcd, val, r.disableEtcdServiceAccountAutomount)
-
-	if err != nil {
-		return nil, nil, err
-	}
-
-	chartPath := getChartPath()
-	renderedChart, err := r.chartApplier.Render(chartPath, etcd.Name, etcd.Namespace, values)
-	if err != nil {
-		return nil, nil, err
+		ConfigMap: componentconfigmap.GenerateValues(etcd),
+		Lease:     componentlease.GenerateValues(etcd),
+		Service:   componentservice.GenerateValues(etcd),
 	}
 
 	leaseDeployer := componentlease.New(r.Client, etcd.Namespace, val.Lease)
@@ -970,12 +867,15 @@ func (r *EtcdReconciler) reconcileEtcd(ctx context.Context, logger logr.Logger, 
 		return nil, nil, err
 	}
 
-	cm, err := r.reconcileConfigMaps(ctx, logger, etcd, renderedChart)
-	if err != nil {
+	cmDeployer := componentconfigmap.New(r.Client, etcd.Namespace, val.ConfigMap)
+	if err := cmDeployer.Deploy(ctx); err != nil {
 		return nil, nil, err
 	}
-	if cm != nil {
-		values["configMapName"] = cm.Name
+
+	values, err := getMapFromEtcd(r.ImageVector, etcd, val, r.disableEtcdServiceAccountAutomount)
+
+	if err != nil {
+		return nil, nil, err
 	}
 
 	err = r.reconcileServiceAccount(ctx, logger, etcd, values)
@@ -1035,17 +935,15 @@ func checkEtcdAnnotations(annotations map[string]string, etcd metav1.Object) boo
 }
 
 func getMapFromEtcd(im imagevector.ImageVector, etcd *druidv1alpha1.Etcd, val componentetcd.Values, disableEtcdServiceAccountAutomount bool) (map[string]interface{}, error) {
-	var statefulsetReplicas int
-	if etcd.Spec.Replicas != 0 {
-		statefulsetReplicas = 1
-	}
+	statefulsetReplicas := int(etcd.Spec.Replicas)
 
 	etcdValues := map[string]interface{}{
 		"clientPort":              val.Service.ClientPort,
 		"defragmentationSchedule": etcd.Spec.Etcd.DefragmentationSchedule,
 		"enableTLS":               (etcd.Spec.Etcd.TLS != nil),
-		"pullPolicy":              corev1.PullIfNotPresent,
+		"pullPolicy":              corev1.PullAlways,
 		"serverPort":              val.Service.ServerPort,
+		"initialCluster":          val.ConfigMap.InitialCluster,
 		// "username":                etcd.Spec.Etcd.Username,
 		// "password":                etcd.Spec.Etcd.Password,
 	}
@@ -1091,7 +989,7 @@ func getMapFromEtcd(im imagevector.ImageVector, etcd *druidv1alpha1.Etcd, val co
 	}
 
 	backupValues := map[string]interface{}{
-		"pullPolicy":               corev1.PullIfNotPresent,
+		"pullPolicy":               corev1.PullAlways,
 		"port":                     val.Service.BackupPort,
 		"etcdQuotaBytes":           quota,
 		"etcdConnectionTimeout":    "5m",
@@ -1195,12 +1093,13 @@ func getMapFromEtcd(im imagevector.ImageVector, etcd *druidv1alpha1.Etcd, val co
 		"sharedConfig":                       sharedConfigValues,
 		"replicas":                           etcd.Spec.Replicas,
 		"statefulsetReplicas":                statefulsetReplicas,
-		"serviceName":                        val.Service.ClientServiceName,
-		"configMapName":                      fmt.Sprintf("etcd-bootstrap-%s", string(etcd.UID[:6])),
-		"jobName":                            getJobName(etcd),
+		"serviceName":                        utils.GetClientServiceName(etcd),
+		"configMapName":                      val.ConfigMap.ConfigMapName,
+		"etcdConfigMountPath":                val.ConfigMap.EtcdConfigMountPath,
+		"jobName":                            utils.GetJobName(etcd),
 		"pdbMinAvailable":                    pdbMinAvailable,
 		"volumeClaimTemplateName":            volumeClaimTemplateName,
-		"serviceAccountName":                 getServiceAccountName(etcd),
+		"serviceAccountName":                 utils.GetServiceAccountName(etcd),
 		"disableEtcdServiceAccountAutomount": disableEtcdServiceAccountAutomount,
 		"roleName":                           fmt.Sprintf("druid.gardener.cloud:etcd:%s", etcd.Name),
 		"roleBindingName":                    fmt.Sprintf("druid.gardener.cloud:etcd:%s", etcd.Name),
@@ -1238,10 +1137,6 @@ func getMapFromEtcd(im imagevector.ImageVector, etcd *druidv1alpha1.Etcd, val co
 	}
 
 	return values, nil
-}
-
-func getServiceAccountName(etcd *druidv1alpha1.Etcd) string {
-	return etcd.Name
 }
 
 func getEtcdImages(im imagevector.ImageVector, etcd *druidv1alpha1.Etcd) (string, string, error) {
@@ -1543,30 +1438,4 @@ func (r *EtcdReconciler) claimConfigMaps(ctx context.Context, etcd *druidv1alpha
 	})
 	cm := NewEtcdDruidRefManager(r.Client, r.Scheme, etcd, selector, etcdGVK, canAdoptFunc)
 	return cm.ClaimConfigMaps(ctx, configMaps)
-}
-
-// SetupWithManager sets up manager with a new controller and r as the reconcile.Reconciler
-func (r *EtcdReconciler) SetupWithManager(mgr ctrl.Manager, workers int, ignoreOperationAnnotation bool) error {
-	builder := ctrl.NewControllerManagedBy(mgr).WithOptions(controller.Options{
-		MaxConcurrentReconciles: workers,
-	})
-	builder = builder.WithEventFilter(buildPredicate(ignoreOperationAnnotation)).For(&druidv1alpha1.Etcd{})
-	if ignoreOperationAnnotation {
-		builder = builder.Owns(&corev1.Service{}).
-			Owns(&corev1.ConfigMap{}).
-			Owns(&appsv1.StatefulSet{})
-	}
-	return builder.Complete(r)
-}
-
-func buildPredicate(ignoreOperationAnnotation bool) predicate.Predicate {
-	if ignoreOperationAnnotation {
-		return predicate.GenerationChangedPredicate{}
-	}
-
-	return predicate.Or(
-		druidpredicates.HasOperationAnnotation(),
-		druidpredicates.LastOperationNotSuccessful(),
-		extensionspredicate.IsDeleting(),
-	)
 }

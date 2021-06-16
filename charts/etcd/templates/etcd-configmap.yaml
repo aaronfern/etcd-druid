@@ -53,6 +53,9 @@ data:
     # Initial cluster state ('new' or 'existing').
     initial-cluster-state: {{ .Values.etcd.initialClusterState }}
 
+    # Initial cluster
+    initial-cluster: {{ .Values.etcd.initialCluster }}
+
     {{- if .Values.sharedConfig }}
     # auto-compaction-mode ("periodic" or "revision").
     {{- if .Values.sharedConfig.autoCompactionMode }}

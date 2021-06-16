@@ -18,8 +18,9 @@ labels: {}
 etcd:
   initialClusterToken: initial
   initialClusterState: new
+  initialCluster: test
   enableTLS: false
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
   metrics: basic
   etcdDefragTimeout: 8m
   resources:
@@ -33,8 +34,10 @@ etcd:
   #password: password
   heartbeatDuration: 10s
 
+etcdConfigMountPath: "/var/etcd/config/"
 backup:
-  pullPolicy: IfNotPresent
+  port: 8080
+  pullPolicy: Always
   snapstoreTempDir: "/var/etcd/data/temp"
   etcdConnectionTimeout: 5m
   etcdQuotaBytes: 8Gi
