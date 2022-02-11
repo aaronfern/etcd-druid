@@ -1,9 +1,9 @@
 images:
 - name: etcd-backup-restore
   sourceRepository: github.com/gardener/etcd-backup-restore
-  repository: eu.gcr.io/gardener-project/gardener/etcdbrctl
-  tag: "v0.15.0"
+  repository: aaronfernandes/etcdbr #eu.gcr.io/gardener-project/gardener/etcdbrctl
+  tag: "v0.0.11-remove" #"v0.15.0"
 - name: etcd
   sourceRepository: github.com/gardener/etcd-custom-image
-  repository: eu.gcr.io/gardener-project/gardener/etcd
-  tag: "v3.4.13-bootstrap-2"
+  repository: aaronfernandes/etcd-custom #eu.gcr.io/gardener-project/gardener/etcd
+  tag: "v0.0.1" #"v3.4.13-bootstrap-2"

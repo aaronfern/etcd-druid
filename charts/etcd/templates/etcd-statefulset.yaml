@@ -47,6 +47,24 @@ spec:
       priorityClassName: {{ .Values.priorityClassName }}
 {{- end }}
       serviceAccountName: {{ .Values.serviceAccountName }}
+      initContainers:
+      - name: member-add
+        image: {{ .Values.backup.image }}
+        imagePullPolicy: Always
+        command:
+          - etcdbrctl
+          - addmember
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: ETCD_ENDPOINT
+          value: {{ .Values.backup.etcdEndpoint }}
       containers:
       - name: etcd
         image: {{ .Values.etcd.image }}
@@ -54,14 +72,23 @@ spec:
         command:
         - /var/etcd/bin/bootstrap.sh
         readinessProbe:
-          httpGet:
-{{- if .Values.etcd.enableTLS }}
-            scheme: HTTPS
-{{- end }}
-            path: /healthz
-            port: {{ .Values.backup.port }}
+          exec:
+            command:
+            - /usr/bin/curl
+            - -k
+            - http://0.0.0.0:2379/health
           initialDelaySeconds: 15
           periodSeconds: 5
+          failureThreshold: 5
+#         readinessProbe:
+#           httpGet:
+# {{- if .Values.etcd.enableTLS }}
+#             scheme: HTTPS
+# {{- end }}
+#             path: /healthz
+#             port: {{ .Values.backup.port }}
+#           initialDelaySeconds: 15
+#           periodSeconds: 5
         livenessProbe:
           exec:
             command:
@@ -215,6 +242,11 @@ spec:
 {{- end }}
         image: {{ .Values.backup.image }}
         imagePullPolicy: {{ .Values.backup.pullPolicy }}
+        # lifecycle:
+        #   preStop:
+        #     exec:
+        #       command:
+        #       - curl http://127.0.0.1:8080/removemember
         ports:
         - containerPort: {{ .Values.backup.port }}
           name: server
@@ -232,6 +264,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        - name: ETCD_ENDPOINT
+          value: {{ .Values.backup.etcdEndpoint }}
 {{- if eq .Values.store.storageProvider "S3" }}
         - name: "AWS_REGION"
           valueFrom:

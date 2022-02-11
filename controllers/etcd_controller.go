@@ -17,6 +17,8 @@ package controllers
 import (
 	"bytes"
 	"context"
+
+	//"crypto/tls"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -66,6 +68,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	//"go.etcd.io/etcd/clientv3"
 )
 
 var (
@@ -673,6 +676,7 @@ func (r *EtcdReconciler) syncStatefulSetSpec(ctx context.Context, logger logr.Lo
 	if err != nil {
 		return nil, err
 	}
+
 	return ssCopy, err
 }
 
@@ -845,9 +849,9 @@ func (r *EtcdReconciler) reconcileRoleBinding(ctx context.Context, logger logr.L
 
 func (r *EtcdReconciler) reconcileEtcd(ctx context.Context, logger logr.Logger, etcd *druidv1alpha1.Etcd) (*string, *appsv1.StatefulSet, error) {
 	// Check if Spec.Replicas is odd or even.
-	if etcd.Spec.Replicas&1 == 0 {
-		return nil, nil, fmt.Errorf("Spec.Replicas should not be even number: %d", etcd.Spec.Replicas)
-	}
+	// if etcd.Spec.Replicas&1 == 0 {
+	// 	return nil, nil, fmt.Errorf("Spec.Replicas should not be even number: %d", etcd.Spec.Replicas)
+	// }
 
 	val := componentetcd.Values{
 		ConfigMap: componentconfigmap.GenerateValues(etcd),
@@ -996,6 +1000,7 @@ func getMapFromEtcd(im imagevector.ImageVector, etcd *druidv1alpha1.Etcd, val co
 		"snapstoreTempDir":         "/var/etcd/data/temp",
 		"deltaSnapshotMemoryLimit": deltaSnapshotMemoryLimit,
 		"enableProfiling":          enableProfiling,
+		"etcdEndpoint":             fmt.Sprintf("http://%s.%s.%s:%d", utils.GetPeerServiceName(etcd), etcd.Namespace, "svc.cluster.local", val.Service.ServerPort),
 	}
 
 	if etcd.Spec.Backup.Resources != nil {
@@ -1093,7 +1098,7 @@ func getMapFromEtcd(im imagevector.ImageVector, etcd *druidv1alpha1.Etcd, val co
 		"sharedConfig":                       sharedConfigValues,
 		"replicas":                           etcd.Spec.Replicas,
 		"statefulsetReplicas":                statefulsetReplicas,
-		"serviceName":                        utils.GetClientServiceName(etcd),
+		"serviceName":                        utils.GetPeerServiceName(etcd),
 		"configMapName":                      val.ConfigMap.ConfigMapName,
 		"etcdConfigMountPath":                val.ConfigMap.EtcdConfigMountPath,
 		"jobName":                            utils.GetJobName(etcd),
